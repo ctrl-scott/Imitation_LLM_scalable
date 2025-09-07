@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <title>Mini LLM Imitation (Pre-Configured)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;max-width:860px;margin:2rem auto;padding:0 1rem;line-height:1.45}
+    .chat{border:1px solid #ddd;border-radius:12px;padding:1rem;background:#fafafa}
+    .row{margin:.5rem 0;padding:.5rem .75rem;border-radius:.75rem}
+    .user{background:#e7f1ff}
+    .bot{background:#fff}
+    .muted{color:#666;font-size:.9rem}
+    .pill{display:inline-block;padding:.15rem .5rem;margin:.15rem;background:#eee;border-radius:999px;font-size:.8rem}
+    .config{white-space:pre;overflow:auto;background:#111;color:#ddd;border-radius:8px;padding:1rem;font-size:.9rem}
+    input,button{font-size:1rem}
+    #q{width:100%;box-sizing:border-box;padding:.75rem;border-radius:.5rem;border:1px solid #ccc;margin-top:.5rem}
+    #send{padding:.6rem 1rem;margin-top:.5rem;border-radius:.5rem;border:1px solid #888;background:#111;color:#fff}
+    .bar{display:flex;gap:.5rem}
+    .side{font-size:.9rem}
+    .grid{display:grid;grid-template-columns:2fr 1fr;gap:1rem}
+    @media (max-width:840px){.grid{grid-template-columns:1fr}}
+  </style>
+</head>
+<body>
+  <h1>Mini LLM Imitation (Pre-Configured)</h1>
+  <p class="muted">A tiny, expandable QA + pattern bot. Edit the JSON config below to grow it.</p>
+
+  <div class="grid">
+    <div>
+      <div class="chat" id="chat"></div>
+      <div class="bar">
+        <input id="q" placeholder="Ask a question..." autocomplete="off"/>
+        <button id="send">Send</button>
+      </div>
+      <p class="muted">Tips: try “hello”, “what is your name”, “set my name to Name”, “weather in City”, “hours for support”, or misspellings like “helo”.</p>
+    </div>
+    <div class="side">
+      <strong>Config (edit live):</strong>
+      <pre id="config" class="config" contenteditable="true">{
+  "bot": { "name": "ScottBot", "persona": "Helpful, concise, metaphorical, literal, etc...." },
+
+  "exact": [
+    { "q": "hello", "a": "Hello! How can I help you today?" },
+    { "q": "help",  "a": "You can ask about hours, simple weather, or set your name." },
+    { "q": "what is your name", "a": "I am ${bot.name}." }
+  ],
+
+  "patterns": [
+    {
+      "pattern": "^set my name to\\s+(?<name>[A-Za-z\\-']{2,})$",
+      "reply": "Nice to meet you, ${name}. I will remember that for this session.",
+      "effects": { "memory.name": "${name}" }
+    },
+    {
+      "pattern": "^(?:what'?s|what is) my name\\??$",
+      "reply": "${memory.name ? `Your name is ${memory.name}.` : `I do not know yet. Say: set my name to <Name>.`}"
+    },
+    {
+      "pattern": "^(?:hours|what are your hours|support hours)\\??$",
+      "reply": "Support is available Mon–Fri, 9am–5pm CT."
+    },
+    {
+      "pattern": "^(?:weather|weather in)\\s+(?<city>[A-Za-z\\s]+)$",
+      "reply": "I do not fetch real weather yet, but here is a template: Weather in ${city.trim()} is sunny with a high of 85°F.",
+      "notes": "This is a stub you can later replace with a real retriever/tool."
+    }
+  ],
+
+  "fuzzy": {
+    "enabled": true,
+    "min_score": 0.45,
+    "candidates": [
+      { "q": "hello", "a": "Hello! Do you need hours or weather?" },
+      { "q": "what is your name", "a": "I am ${bot.name}." },
+      { "q": "hours", "a": "Support is pre-programmed or pre-configured as this is currently an example." }
+    ]
+  }
+}</pre>
+
+      <div style="margin-top:.5rem">
+        <span class="pill">Exact QA</span>
+        <span class="pill">Regex Patterns</span>
+        <span class="pill">Fuzzy Matching</span>
+        <span class="pill">Session Memory</span>
+      </div>
+    </div>
+  </div>
+
+<script>
+(function(){
+  // --- Utilities ------------------------------------------------------------
+  const el = id => document.getElementById(id);
+  const chat = el('chat');
+  const input = el('q');
+  const sendBtn = el('send');
+
+  const state = {
+    memory: {},     // ephemeral session memory (e.g., { name: "Jordan" })
+    cfg: null
+  };
+
+  function safeEvalTemplate(str, ctx){
+    // Very small, sandboxed template using ${...} with limited scope.
+    // We avoid eval; we replace ${var} patterns with resolved values.
+    // Supports dot paths like bot.name and memory.name.
+    return str.replace(/\$\{([^}]+)\}/g, (_, expr) => {
+      try {
+        // Very tiny parser: supports ternary and simple JS via Function
+        // but restrict scope by passing only ctx.
+        const f = new Function("ctx", "with(ctx){ return (" + expr + "); }");
+        const v = f(ctx);
+        return (v === undefined || v === null) ? "" : String(v);
+      } catch {
+        // Fallback: try a dotted path like a.b.c
+        const path = expr.trim();
+        const val = path.split('.').reduce((o,k)=>o && o[k], ctx);
+        return (val === undefined || val === null) ? "" : String(val);
+      }
+    });
+  }
+
+  function normalize(s){
+    return s.toLowerCase().replace(/[^a-z0-9\s]/g,' ').replace(/\s+/g,' ').trim();
+  }
+
+  function jaccard(a, b){
+    const A = new Set(a.split(' '));
+    const B = new Set(b.split(' '));
+    let inter = 0;
+    for(const t of A) if(B.has(t)) inter++;
+    const union = A.size + B.size - inter;
+    return union === 0 ? 0 : inter / union;
+  }
+
+  function addRow(text, who){
+    const div = document.createElement('div');
+    div.className = 'row ' + (who==='user'?'user':'bot');
+    div.textContent = text;
+    chat.appendChild(div);
+    chat.scrollTop = chat.scrollHeight;
+  }
+
+  function readConfig(){
+    try{
+      const cfg = JSON.parse(el('config').textContent);
+      state.cfg = cfg;
+      return cfg;
+    }catch(e){
+      console.warn("Config JSON error:", e);
+      return state.cfg; // keep last good
+    }
+  }
+
+  function applyEffects(effects, ctx){
+    if(!effects) return;
+    for(const k of Object.keys(effects)){
+      const v = safeEvalTemplate(effects[k], ctx);
+      if(k.startsWith('memory.')){
+        const path = k.split('.').slice(1);
+        let cur = state.memory;
+        for(let i=0;i<path.length-1;i++){
+          const seg = path[i];
+          cur[seg] = cur[seg] || {};
+          cur = cur[seg];
+        }
+        cur[path[path.length-1]] = v;
+      }
+    }
+  }
+
+  // --- Core pipeline --------------------------------------------------------
+  function respond(userText){
+    const cfg = readConfig() || {};
+    const context = { bot: (cfg.bot||{}), memory: state.memory };
+    const raw = userText;
+    const qnorm = normalize(raw);
+
+    // 1) Exact QA
+    if(Array.isArray(cfg.exact)){
+      for(const item of cfg.exact){
+        if(normalize(item.q) === qnorm){
+          const out = safeEvalTemplate(item.a, context);
+          return out;
+        }
+      }
+    }
+
+    // 2) Pattern rules (regex with named groups)
+    if(Array.isArray(cfg.patterns)){
+      for(const rule of cfg.patterns){
+        try{
+          const re = new RegExp(rule.pattern, 'i');
+          const m = raw.match(re);
+          if(m){
+            // Build rule context with named groups
+            const locals = Object.assign({}, m.groups || {});
+            const ctx = Object.assign({}, context, locals);
+            const reply = safeEvalTemplate(rule.reply, ctx);
+            applyEffects(rule.effects, ctx);
+            return reply;
+          }
+        }catch(e){
+          console.warn("Bad pattern:", rule.pattern, e);
+        }
+      }
+    }
+
+    // 3) Fuzzy fallback over declared candidates
+    if(cfg.fuzzy && cfg.fuzzy.enabled && Array.isArray(cfg.fuzzy.candidates)){
+      let best = {score:0, a:null};
+      for(const cand of cfg.fuzzy.candidates){
+        const score = jaccard(qnorm, normalize(cand.q));
+        if(score > best.score) best = { score, a: cand.a };
+      }
+      if(best.score >= (cfg.fuzzy.min_score ?? 0.5)){
+        return safeEvalTemplate(best.a, context);
+      }
+    }
+
+    // 4) Default
+    return "I am not sure yet. Try rephrasing or teach me by adding an entry to the config.";
+  }
+
+  // --- UI wiring ------------------------------------------------------------
+  function send(){
+    const text = input.value.trim();
+    if(!text) return;
+    addRow(text, 'user');
+    input.value = '';
+    const out = respond(text);
+    addRow(out, 'bot');
+  }
+
+  sendBtn.addEventListener('click', send);
+  input.addEventListener('keydown', e => { if(e.key === 'Enter') send(); });
+
+  // Seed a greeting
+  addRow("Hello! I am " + (readConfig()?.bot?.name || "the bot") + ". Ask me something.", 'bot');
+})();
+</script>
+</body>
+</html>
